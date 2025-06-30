@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPEG-DASH Downloader Cerdas</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            background-color: #f0f2f5;
+            color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 700px;
+            text-align: center;
+        }
+        h1 {
+            color: #1a73e8;
+            margin-bottom: 20px;
+        }
+        p {
+            color: #5f6368;
+            margin-bottom: 25px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        #mpdUrl {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        #downloadBtn {
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            width: 100%;
+        }
+        #downloadBtn:hover:not(:disabled) {
+            background-color: #155ab6;
+        }
+        #downloadBtn:disabled {
+            background-color: #9e9e9e;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 25px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            text-align: left;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: "Courier New", Courier, monospace;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #1a73e8;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+            display: none;
+            margin: 20px auto 0;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>MPEG-DASH Downloader Cerdas</h1>
+        <p>Masukkan URL ke file manifest (.mpd). Alat ini dapat menangani format SegmentTemplate dan SegmentBase.</p>
+        
+        <div class="input-group">
+            <input type="url" id="mpdUrl" placeholder="https://example.com/path/to/manifest.mpd">
+        </div>
+        
+        <button id="downloadBtn">Unduh Video</button>
+        
+        <div id="spinner" class="spinner"></div>
+        
+        <div id="status">
+            <strong>Log Status:</strong><br>
+            Menunggu input URL...
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script>
+        const { FFmpeg } = FFmpegWASM;
+        let ffmpeg;
+
+        const downloadBtn = document.getElementById('downloadBtn');
+        const mpdUrlInput = document.getElementById('mpdUrl');
+        const statusLog = document.getElementById('status');
+        const spinner = document.getElementById('spinner');
+
+        // Mengisi input dengan URL dari user untuk kemudahan pengujian
+        mpdUrlInput.value = 'https://cdn.jsdelivr.net/gh/aws-AfASTyRosISodENTECTOPhEAdminPavelit/0/1/1/v.mpd';
+
+        function log(message) {
+            console.log(message);
+            statusLog.innerHTML += `\n${message}`;
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+
+        function setUIState(isDownloading) {
+            downloadBtn.disabled = isDownloading;
+            mpdUrlInput.disabled = isDownloading;
+            spinner.style.display = isDownloading ? 'block' : 'none';
+        }
+
+        async function initializeFFmpeg() {
+            if (!ffmpeg || !ffmpeg.loaded) {
+                ffmpeg = new FFmpeg();
+                ffmpeg.on('log', ({ message }) => {
+                    if (message.includes('Input') || message.includes('Output') || message.includes('size=') || message.includes('bitrate=')) {
+                       log(`[FFMPEG] ${message}`);
+                    }
+                });
+                log('Memuat FFmpeg-core.js (~31 MB)... Ini mungkin memakan waktu.');
+                await ffmpeg.load({
+                    coreURL: "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js"
+                });
+                log('FFmpeg berhasil dimuat.');
+            }
+        }
+
+        downloadBtn.addEventListener('click', async () => {
+            const url = mpdUrlInput.value.trim();
+            if (!url) {
+                alert('Silakan masukkan URL manifest .mpd');
+                return;
+            }
+
+            setUIState(true);
+            statusLog.innerHTML = '<strong>Log Status:</strong>';
+
+            try {
+                await initializeFFmpeg();
+
+                log(`Mengambil manifest dari: ${url}`);
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`Gagal mengambil manifest: ${response.statusText}`);
+                const manifestText = await response.text();
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(manifestText, "application/xml");
+                
+                const baseUrl = new URL(url);
+                const manifestBaseUrl = xmlDoc.querySelector('BaseURL')?.textContent || '';
+                const finalBaseUrl = new URL(manifestBaseUrl, baseUrl.href).href;
+
+                let videoData, audioData;
+
+                // --- DETEKSI FORMAT MANIFEST ---
+                if (xmlDoc.querySelector('SegmentTemplate')) {
+                    log('Mendeteksi format manifest: SegmentTemplate (banyak segmen)');
+                    [videoData, audioData] = await handleSegmentTemplate(xmlDoc, finalBaseUrl);
+                } else if (xmlDoc.querySelector('SegmentBase')) {
+                    log('Mendeteksi format manifest: SegmentBase (file tunggal)');
+                    [videoData, audioData] = await handleSegmentBase(xmlDoc, finalBaseUrl);
+                } else {
+                    throw new Error('Format manifest tidak didukung (bukan SegmentTemplate atau SegmentBase).');
+                }
+                
+                log(`Total ukuran video: ${(videoData.length / 1024 / 1024).toFixed(2)} MB`);
+                log(`Total ukuran audio: ${(audioData.length / 1024 / 1024).toFixed(2)} MB`);
+
+                log('Menulis file ke memori virtual FFmpeg...');
+                await ffmpeg.writeFile('input_video.mp4', videoData);
+                await ffmpeg.writeFile('input_audio.m4a', audioData);
+
+                log('Menjalankan perintah FFmpeg untuk menggabungkan (remux)...');
+                await ffmpeg.exec(['-i', 'input_video.mp4', '-i', 'input_audio.m4a', '-c', 'copy', 'output.mp4']);
+                
+                log('Proses remuxing selesai.');
+                const outputData = await ffmpeg.readFile('output.mp4');
+
+                log('Membuat file unduhan...');
+                const outputBlob = new Blob([outputData.buffer], { type: 'video/mp4' });
+                const downloadUrl = URL.createObjectURL(outputBlob);
+                
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = downloadUrl;
+                a.download = 'video_hasil_unduhan.mp4';
+                document.body.appendChild(a);
+                a.click();
+                
+                log('Unduhan telah dimulai! Periksa folder unduhan Anda.');
+
+                window.URL.revokeObjectURL(downloadUrl);
+                document.body.removeChild(a);
+
+            } catch (error) {
+                log(`\n--- ERROR --- \n${error.message}\n\nPastikan server mendukung CORS dan URL valid.`);
+                console.error(error);
+            } finally {
+                setUIState(false);
+            }
+        });
+
+        // --- HANDLER UNTUK SegmentBase (KASUS URL ANDA) ---
+        async function handleSegmentBase(xmlDoc, baseUrl) {
+            const videoRep = findRepresentation(xmlDoc, 'video');
+            const audioRep = findRepresentation(xmlDoc, 'audio');
+
+            if (!videoRep || !videoRep.baseURL) throw new Error('Stream video dengan BaseURL tidak ditemukan.');
+            if (!audioRep || !audioRep.baseURL) throw new Error('Stream audio dengan BaseURL tidak ditemukan.');
+
+            log(`Video ditemukan: ${videoRep.baseURL}`);
+            log(`Audio ditemukan: ${audioRep.baseURL}`);
+
+            const videoUrl = new URL(videoRep.baseURL, baseUrl).href;
+            const audioUrl = new URL(audioRep.baseURL, baseUrl).href;
+
+            log(`Mengunduh file video lengkap: ${videoUrl}`);
+            const videoPromise = fetch(videoUrl).then(res => res.arrayBuffer());
+            
+            log(`Mengunduh file audio lengkap: ${audioUrl}`);
+            const audioPromise = fetch(audioUrl).then(res => res.arrayBuffer());
+
+            const [videoBuffer, audioBuffer] = await Promise.all([videoPromise, audioPromise]);
+
+            return [new Uint8Array(videoBuffer), new Uint8Array(audioBuffer)];
+        }
+
+        // --- HANDLER UNTUK SegmentTemplate (KODE LAMA) ---
+        async function handleSegmentTemplate(xmlDoc, baseUrl) {
+            const videoRep = findBestRepresentation(xmlDoc, 'video');
+            const audioRep = findBestRepresentation(xmlDoc, 'audio');
+
+            if (!videoRep) throw new Error('Stream video tidak ditemukan di manifest.');
+            if (!audioRep) throw new Error('Stream audio tidak ditemukan di manifest.');
+
+            log(`Video dipilih: ${videoRep.id} (${videoRep.width}x${videoRep.height}, ${Math.round(videoRep.bandwidth / 1000)} kbps)`);
+            log(`Audio dipilih: ${audioRep.id} (${Math.round(audioRep.bandwidth / 1000)} kbps)`);
+
+            log('Memulai pengunduhan segmen video dan audio...');
+            const [videoSegments, audioSegments] = await Promise.all([
+                downloadAllSegments(videoRep, baseUrl, 'Video'),
+                downloadAllSegments(audioRep, baseUrl, 'Audio')
+            ]);
+            
+            log('Menggabungkan segmen-segmen yang telah diunduh...');
+            const videoData = new Uint8Array(await new Blob(videoSegments).arrayBuffer());
+            const audioData = new Uint8Array(await new Blob(audioSegments).arrayBuffer());
+
+            return [videoData, audioData];
+        }
+        
+        // Fungsi helper umum untuk mencari representasi, bisa dipakai keduanya
+        function findRepresentation(xmlDoc, type) {
+            let bestRep = null;
+            let maxBandwidth = 0;
+            const adaptationSets = xmlDoc.querySelectorAll(`AdaptationSet[contentType="${type}"], AdaptationSet[mimeType^="${type}/"]`);
+            
+            adaptationSets.forEach(set => {
+                const representations = set.querySelectorAll('Representation');
+                representations.forEach(rep => {
+                    const bandwidth = parseInt(rep.getAttribute('bandwidth'), 10);
+                    if (bandwidth > maxBandwidth) {
+                        maxBandwidth = bandwidth;
+                        const segmentTemplate = rep.querySelector('SegmentTemplate') || set.querySelector('SegmentTemplate');
+                        bestRep = {
+                            id: rep.getAttribute('id'),
+                            bandwidth: bandwidth,
+                            width: rep.getAttribute('width'),
+                            height: rep.getAttribute('height'),
+                            codecs: rep.getAttribute('codecs'),
+                            baseURL: rep.querySelector('BaseURL')?.textContent,
+                            initialization: segmentTemplate?.getAttribute('initialization'),
+                            media: segmentTemplate?.getAttribute('media'),
+                            startNumber: parseInt(segmentTemplate?.getAttribute('startNumber') || '1', 10),
+                            duration: parseInt(segmentTemplate?.getAttribute('duration'), 10),
+                            timescale: parseInt(segmentTemplate?.getAttribute('timescale'), 10),
+                            segmentTimeline: segmentTemplate?.querySelector('SegmentTimeline')
+                        };
+                    }
+                });
+            });
+            return bestRep;
+        }
+
+        // (Fungsi downloadAllSegments, parseISODuration, dan findBestRepresentation dari kode sebelumnya tetap sama dan diperlukan untuk SegmentTemplate)
+        function findBestRepresentation(xmlDoc, type) { /* ... implementasi dari kode sebelumnya ... */ return findRepresentation(xmlDoc, type); }
+        async function downloadAllSegments(rep, baseUrl, type) { /* ... implementasi dari kode sebelumnya ... */ }
+        function parseISODuration(duration) { /* ... implementasi dari kode sebelumnya ... */ }
+
+        // --- PASTE FUNGSI-FUNGSI DARI KODE SEBELUMNYA DI SINI ---
+        async function downloadAllSegments(rep, baseUrl, type) {
+            const segments = [];
+            const initUrl = new URL(rep.initialization.replace('$RepresentationID$', rep.id), baseUrl).href;
+            log(`[${type}] Mengunduh segmen init: ${initUrl}`);
+            const initResponse = await fetch(initUrl);
+            if (!initResponse.ok) throw new Error(`Gagal mengunduh segmen init ${type}`);
+            segments.push(await initResponse.arrayBuffer());
+
+            const segmentUrls = [];
+            if (rep.segmentTimeline) {
+                const sElements = rep.segmentTimeline.querySelectorAll('S');
+                let time = 0;
+                sElements.forEach(s => {
+                    const d = parseInt(s.getAttribute('d'), 10);
+                    const r = parseInt(s.getAttribute('r') || '0', 10);
+                    for (let i = 0; i <= r; i++) {
+                        const mediaUrl = rep.media.replace('$RepresentationID$', rep.id).replace('$Time$', time);
+                        segmentUrls.push(new URL(mediaUrl, baseUrl).href);
+                        time += d;
+                    }
+                });
+            } else {
+                const periodDuration = xmlDoc.querySelector('Period')?.getAttribute('duration');
+                if (!rep.duration && periodDuration) {
+                    const durationSeconds = parseISODuration(periodDuration);
+                    const segmentDurationSeconds = rep.duration / rep.timescale;
+                    rep.totalSegments = Math.ceil(durationSeconds / segmentDurationSeconds);
+                } else if (!rep.duration) {
+                     throw new Error(`Tidak dapat menentukan jumlah segmen untuk tipe ${type}.`);
+                }
+                const totalSegments = rep.totalSegments;
+                for (let i = rep.startNumber; i < rep.startNumber + totalSegments; i++) {
+                     const mediaUrl = rep.media.replace('$RepresentationID$', rep.id).replace('$Number$', i);
+                     segmentUrls.push(new URL(mediaUrl, baseUrl).href);
+                }
+            }
+
+            log(`[${type}] Ditemukan ${segmentUrls.length} segmen media untuk diunduh.`);
+            let downloadedCount = 0;
+            const totalCount = segmentUrls.length;
+            for (const url of segmentUrls) {
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) { throw new Error(`Status ${response.status}`); }
+                    segments.push(await response.arrayBuffer());
+                    downloadedCount++;
+                    if (downloadedCount % 10 === 0 || downloadedCount === totalCount) {
+                        log(`[${type}] Mengunduh segmen media: ${downloadedCount} / ${totalCount}`);
+                    }
+                } catch (e) {
+                     log(`[${type}] Peringatan: Gagal mengunduh segmen ${url}. Melanjutkan... (${e.message})`);
+                }
+            }
+            return segments;
+        }
+
+        function parseISODuration(duration) {
+            const matches = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/);
+            if (!matches) return 0;
+            const hours = parseInt(matches[1] || '0', 10);
+            const minutes = parseInt(matches[2] || '0', 10);
+            const seconds = parseFloat(matches[3] || '0');
+            return (hours * 3600) + (minutes * 60) + seconds;
+        }
+
+    </script>
+</body>
+</html>
